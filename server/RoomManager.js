@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 
 class Room {
-    constructor(id, name, owner, mode, isPrivate) {
+    constructor(id, name, owner, mode, isPrivate, maxPlayers = null, numTeams = 2) {
         this.id = id;
         this.name = name;
         this.ownerId = owner.id;
@@ -11,7 +11,9 @@ class Room {
         this.readyStates = new Map(); // playerId -> boolean
         this.readyStates.set(owner.id, false);
         this.gameEngine = null;
-        this.maxPlayers = mode === 'teamDM' ? 4 : 6; // esempio
+        this.maxPlayers = maxPlayers || (mode === 'teamDM' ? 4 : 6); // esempio
+        this.numTeams = numTeams;
+        this.joinCode = null; // generato dal RoomManager
         // Rounds / punteggi
         this.roundsToWin = 3;
         if (this.mode === 'teamDM') {
@@ -85,7 +87,10 @@ class Room {
             })),
             ownerId: this.ownerId
             , roundsToWin: this.roundsToWin,
-            scores: this.scores
+            scores: this.scores,
+            maxPlayers: this.maxPlayers,
+            numTeams: this.numTeams,
+            joinCode: this.joinCode
         };
     }
 }
@@ -100,14 +105,39 @@ class RoomManager {
     createRoom(roomName, owner, mode, isPrivate) {
         const id = uuidv4();
         const room = new Room(id, roomName, owner, mode, isPrivate);
+        // generate short join code for private rooms
+        room.joinCode = this._generateCode();
         this.rooms.set(id, room);
         // Notifica a tutti i client l'aggiornamento della lista stanze pubbliche
         this.io.emit('roomList', this.getPublicRoomsInfo());
         return room;
     }
 
+    createRoomWithOptions(roomName, owner, mode, isPrivate, maxPlayers, numTeams) {
+        const id = uuidv4();
+        const room = new Room(id, roomName, owner, mode, isPrivate, maxPlayers, numTeams);
+        room.joinCode = this._generateCode();
+        this.rooms.set(id, room);
+        this.io.emit('roomList', this.getPublicRoomsInfo());
+        return room;
+    }
+
     getRoom(roomId) {
         return this.rooms.get(roomId);
+    }
+
+    getRoomByCode(code) {
+        for (let room of this.rooms.values()) {
+            if (room.joinCode === code) return room;
+        }
+        return null;
+    }
+
+    _generateCode() {
+        const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+        let out = '';
+        for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+        return out;
     }
 
     deleteRoom(roomId) {

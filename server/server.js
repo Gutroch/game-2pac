@@ -23,7 +23,20 @@ io.on('connection', (socket) => {
         let nickname = null, character = null;
         if (typeof payload === 'string') nickname = payload;
         else if (payload && typeof payload === 'object') { nickname = payload.nickname; character = payload.character; }
-        nickname = nickname || 'Guest';
+        nickname = (nickname || '').trim();
+
+        // Validazione severa del nickname
+        const isValid = (n) => {
+            if (!n) return false;
+            if (n.length < 3 || n.length > 16) return false;
+            if (!/^[a-zA-Z0-9_\-]+$/.test(n)) return false;
+            return true;
+        };
+        if (!isValid(nickname)) {
+            socket.emit('nickRejected', 'Nickname non valido. Usa 3-16 caratteri alfanumerici/underscore.');
+            return;
+        }
+
         const player = playerManager.addPlayer(socket.id, nickname, character);
         socket.emit('init', { playerId: socket.id, nickname: player.nickname, character: player.character });
 
@@ -41,11 +54,18 @@ io.on('connection', (socket) => {
 
     // Creazione stanza
     socket.on('createRoom', (data) => {
-        const { roomName, mode, isPrivate } = data;
+        const { roomName, mode, isPrivate, maxPlayers, numTeams } = data || {};
         const player = playerManager.getPlayer(socket.id);
         if (!player) return;
 
-        const room = roomManager.createRoom(roomName, player, mode, isPrivate);
+        // basic validation
+        if (!roomName || typeof roomName !== 'string' || roomName.trim().length === 0) {
+            socket.emit('error', 'Nome stanza non valido');
+            return;
+        }
+
+        // create with options
+        const room = roomManager.createRoomWithOptions(roomName.trim(), player, mode || 'teamDM', !!isPrivate, parseInt(maxPlayers) || null, parseInt(numTeams) || 2);
         if (room) {
             // Il giocatore entra automaticamente nella stanza
             socket.join(room.id);
@@ -79,6 +99,25 @@ io.on('connection', (socket) => {
             player.currentRoom = room.id;
             io.to(room.id).emit('roomJoined', room.getInfo());
             // Aggiorna la lista stanze per tutti
+            io.emit('roomList', roomManager.getPublicRoomsInfo());
+        } else {
+            socket.emit('error', 'Impossibile entrare nella stanza (piena?)');
+        }
+    });
+
+    // Join tramite codice stanza (per stanze private)
+    socket.on('joinRoomByCode', (code) => {
+        if (!code) { socket.emit('error', 'Codice stanza mancante'); return; }
+        const player = playerManager.getPlayer(socket.id);
+        if (!player) return;
+        const room = roomManager.getRoomByCode(code);
+        if (!room) { socket.emit('error', 'Codice stanza non valido'); return; }
+
+        const success = room.addPlayer(player);
+        if (success) {
+            socket.join(room.id);
+            player.currentRoom = room.id;
+            socket.emit('roomJoined', room.getInfo());
             io.emit('roomList', roomManager.getPublicRoomsInfo());
         } else {
             socket.emit('error', 'Impossibile entrare nella stanza (piena?)');

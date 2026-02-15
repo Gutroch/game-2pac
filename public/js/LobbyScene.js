@@ -60,6 +60,16 @@ class LobbyScene extends Phaser.Scene {
         const createBtnText = this.add.text(24 + 12, 404, 'CREA NUOVA STANZA', { fill: '#7CFF7C', fontSize: '14px', fontFamily: 'VT323, monospace' });
         createBtn.setInteractive({ useHandCursor: true }).on('pointerdown', () => this.showCreateRoomModal());
 
+        // Join by code input
+        this.add.text(24, 360, 'Entra con codice stanza:', { fill: '#7CFF7C', fontFamily: 'VT323, monospace' });
+        const joinInput = this.add.dom(220, 368).createFromHTML('<input id="joinCode" placeholder="XXXXXX" style="width:120px;font-family:VT323,monospace;background:#001;color:#7CFF7C;border:1px solid #224;padding:6px">');
+        const joinBtn = this.add.text(360, 364, 'JOIN', { fill: '#7CFF7C', fontFamily: 'VT323, monospace' }).setInteractive({ useHandCursor: true });
+        joinBtn.on('pointerdown', () => {
+            const code = joinInput.node.querySelector('#joinCode').value.trim().toUpperCase();
+            if (!code) { this.showToast('Inserisci codice stanza', 1500); return; }
+            this.socket.emit('joinRoomByCode', code);
+        });
+
         // Pannello stanza corrente (se dentro una stanza)
         this.roomPanel = this.add.container(320, 92);
         this.roomPanel.setVisible(false);
@@ -72,6 +82,12 @@ class LobbyScene extends Phaser.Scene {
         this.socket.on('roomList', (rooms) => {
             this.rooms = rooms;
             this.updateRoomsList();
+        });
+
+        this.socket.on('nickRejected', (msg) => {
+            this.showToast(msg, 3000);
+            // reopen nickname modal
+            this.showNicknameModal();
         });
 
         this.socket.on('roomJoined', (roomInfo) => {
@@ -164,7 +180,7 @@ class LobbyScene extends Phaser.Scene {
         }
 
         // Pulsante ready (se non già pronto)
-        const myId = this.registry.get('playerId');
+        myId = this.registry.get('playerId');
         const me = room.players.find(p => p.id === myId);
         if (me && !me.ready) {
             const readyBtn = this.add.text(10, y + 10, 'Pronto', { fill: '#0f0', backgroundColor: '#333', padding: { x: 10, y: 5 } })
@@ -182,19 +198,32 @@ class LobbyScene extends Phaser.Scene {
                 this.socket.emit('leaveRoom');
             });
         this.roomPanel.add(leaveBtn);
+
+        // If owner and private, show join code with copy button
+        if (room.isPrivate && room.ownerId === myId) {
+            const codeText = this.add.text(10, y + 80, `Codice stanza: ${room.joinCode || '---'}`, { fill: '#7CFF7C', fontFamily: 'VT323, monospace' });
+            const copyBtn = this.add.text(10, y + 100, 'Copia codice', { fill: '#0ff', backgroundColor: '#002', padding: { x:8, y:4 } }).setInteractive({ useHandCursor: true });
+            copyBtn.on('pointerdown', () => {
+                try { navigator.clipboard.writeText(room.joinCode || ''); this.showToast('Codice copiato negli appunti', 1500); } catch (e) { this.showToast('Copia non supportata', 1500); }
+            });
+            this.roomPanel.add([codeText, copyBtn]);
+            y += 40;
+        }
     }
 
         showCreateRoomModal() {
                 const html = `
-                <div style="font-family: VT323, monospace; color: #7CFF7C; background:#04110b; padding:12px; border:2px solid #133; width:320px">
+                <div style="font-family: VT323, monospace; color: #7CFF7C; background:#04110b; padding:12px; border:2px solid #133; width:360px">
                     <form id="createRoomForm">
                         <div style="margin-bottom:8px">Nome stanza:<br><input name="roomName" style="width:100%; font-family: VT323, monospace; background:#001; color:#7CFF7C; border:1px solid #224; padding:4px" /></div>
                         <div style="margin-bottom:8px">Modalità:<br>
-                            <select name="mode" style="width:100%; font-family: VT323, monospace; background:#001; color:#7CFF7C; border:1px solid #224; padding:4px">
+                            <select name="mode" id="modeSel" style="width:100%; font-family: VT323, monospace; background:#001; color:#7CFF7C; border:1px solid #224; padding:4px">
                                 <option value="teamDM">Team DM</option>
                                 <option value="ffa">FFA</option>
                             </select>
                         </div>
+                        <div style="margin-bottom:8px">Max giocatori:<br><input type="number" name="maxPlayers" min="2" max="12" value="4" style="width:100%; font-family:VT323,monospace;background:#001;color:#7CFF7C;border:1px solid #224;padding:4px" /></div>
+                        <div style="margin-bottom:8px">Numero squadre (solo teamDM):<br><input type="number" name="numTeams" min="2" max="4" value="2" style="width:100%; font-family:VT323,monospace;background:#001;color:#7CFF7C;border:1px solid #224;padding:4px" /></div>
                         <div style="margin-bottom:8px"><label><input type="checkbox" name="isPrivate" /> Stanza privata</label></div>
                         <div style="text-align:right"><button type="submit" style="font-family: VT323, monospace; background:#133; color:#7CFF7C; border:1px solid #224; padding:6px">Crea</button>
                         <button type="button" id="cancelBtn" style="font-family: VT323, monospace; background:#331; color:#ffcccc; border:1px solid #224; padding:6px; margin-left:6px">Annulla</button></div>
@@ -211,8 +240,10 @@ class LobbyScene extends Phaser.Scene {
                         const roomName = form.elements['roomName'].value.trim();
                         const mode = form.elements['mode'].value;
                         const isPrivate = form.elements['isPrivate'].checked;
+                        const maxPlayers = parseInt(form.elements['maxPlayers'].value) || null;
+                        const numTeams = parseInt(form.elements['numTeams'].value) || 2;
                         if (!roomName) { this.showToast('Inserisci un nome stanza', 2000); return; }
-                        this.socket.emit('createRoom', { roomName, mode, isPrivate });
+                        this.socket.emit('createRoom', { roomName, mode, isPrivate, maxPlayers, numTeams });
                         cleanup();
                 });
         }
