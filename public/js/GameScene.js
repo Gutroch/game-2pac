@@ -16,6 +16,7 @@ class GameScene extends Phaser.Scene {
         this.powerups    = {};
         this.obstacles   = [];
         this.floatingTexts = [];
+        this.maxAmmo = 6;
     }
 
     preload() { this._genTextures(); }
@@ -118,9 +119,16 @@ class GameScene extends Phaser.Scene {
     }
 
     _setupInput() {
-        this.cursors = this.input.keyboard.addKeys('W,A,S,D');
+        // Use explicit key mapping to ensure keys exist across platforms
+        this.cursors = this.input.keyboard.addKeys({
+            W: Phaser.Input.Keyboard.KeyCodes.W,
+            A: Phaser.Input.Keyboard.KeyCodes.A,
+            S: Phaser.Input.Keyboard.KeyCodes.S,
+            D: Phaser.Input.Keyboard.KeyCodes.D
+        });
         this.keyP = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.P);
         this.keyN = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.N);
+        this.keyE = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
         this.input.on('pointerdown', (ptr) => { if(ptr.leftButtonDown()) this._tryShoot(); });
     }
 
@@ -151,7 +159,21 @@ class GameScene extends Phaser.Scene {
         this.add.text(200,449,'AMMO',{fontFamily:'VT323, monospace',fontSize:'16px',color:'#ffaa33'}).setDepth(d+1);
         this.ammoText = this.add.text(255,449,'---',{fontFamily:'VT323, monospace',fontSize:'16px',color:'#ffdd22'}).setDepth(d+1);
 
+        this.add.text(360,449,'SUPER',{fontFamily:'VT323, monospace',fontSize:'16px',color:'#ff88ff'}).setDepth(d+1);
+        this.superText = this.add.text(412,449,'--',{fontFamily:'VT323, monospace',fontSize:'16px',color:'#ff88ff'}).setDepth(d+1);
+
         this.add.text(628,449,'WASD MOVE  CLICK/P SHOOT  N RELOAD',{fontFamily:'VT323, monospace',fontSize:'11px',color:'#336677'}).setOrigin(1,0).setDepth(d+1);
+
+        // Clickable HUD buttons: Shoot, Reload, Super
+        const btnStyle = { fontFamily:'VT323, monospace', fontSize:'12px', color:'#001122', backgroundColor:'#88ddff', padding:{x:8,y:6} };
+        this.shootBtn = this.add.text(520,446,'SHOOT',btnStyle).setDepth(d+2).setInteractive({useHandCursor:true});
+        this.shootBtn.on('pointerdown', ()=> this._tryShoot());
+
+        this.reloadBtn = this.add.text(580,446,'RELOAD',Object.assign({},btnStyle,{backgroundColor:'#ffcc66',color:'#221100'})).setDepth(d+2).setInteractive({useHandCursor:true});
+        this.reloadBtn.on('pointerdown', ()=> this.socket.emit('reload'));
+
+        this.superBtn = this.add.text(640,446,'SUPER (E)',Object.assign({},btnStyle,{backgroundColor:'#ff88ff',color:'#220022'})).setDepth(d+2).setInteractive({useHandCursor:true}).setOrigin(1,0);
+        this.superBtn.on('pointerdown', ()=> this.socket.emit('useSuper'));
     }
 
     _createVignette() {
@@ -210,6 +232,8 @@ class GameScene extends Phaser.Scene {
             this._spawnFloatingText(data.x,data.y-10,'-'+(data.damage||''),'#ff4444');
         });
 
+        // Server may send global effect events also handled above
+
         this.socket.on('powerupSpawned', (pu) => {
             if(this.powerups[pu.id]) return;
             const img=this.add.image(pu.x,pu.y,pu.type==='heal'?'powerup_heal':'powerup_speed').setDepth(8);
@@ -228,6 +252,31 @@ class GameScene extends Phaser.Scene {
             }
         });
 
+        this.socket.on('globalEffect', (ev) => {
+            // ev: { type, duration, source, target }
+            if (ev.type === 'blind') {
+                const overlay = this.add.rectangle(0,0,640,480,0x000000,0.95).setOrigin(0).setDepth(300);
+                this.tweens.add({ targets: overlay, alpha: 0, duration: ev.duration*1000, delay: ev.duration*1000, onComplete: ()=>overlay.destroy() });
+                // fade out quickly after duration
+                this.time.delayedCall(ev.duration*1000, ()=>{
+                    if (overlay?.active) this.tweens.add({ targets: overlay, alpha:0, duration:250, onComplete:()=>overlay.destroy() });
+                });
+            } else if (ev.type === 'freeze') {
+                const txt = this.add.text(320,220,'FROZEN',{fontFamily:'VT323, monospace',fontSize:'36px',color:'#88ddff',backgroundColor:'#001022'}).setOrigin(0.5).setDepth(301);
+                this.time.delayedCall(ev.duration*1000, ()=>{ if(txt?.active) txt.destroy(); });
+                this.cameras.main.shake(200,0.002);
+            } else if (ev.type === 'slow') {
+                const txt = this.add.text(320,220,'SLOWED',{fontFamily:'VT323, monospace',fontSize:'36px',color:'#aaffee',backgroundColor:'#001022'}).setOrigin(0.5).setDepth(301);
+                this.time.delayedCall(ev.duration*1000, ()=>{ if(txt?.active) txt.destroy(); });
+            } else if (ev.type === 'shield') {
+                const target = this.players[ev.target];
+                if (target) {
+                    const ring = this.add.ellipse(target.x, target.y, 40,40,0xffff88,0.25).setDepth(70);
+                    this.tweens.add({ targets: ring, scaleX:1.2, scaleY:1.2, alpha:0, duration:ev.duration*1000, onComplete:()=>ring.destroy() });
+                }
+            }
+        });
+
         this.socket.on('gameOver', (data) => {
             this._showToast('VINCITORE: '+data.winner,2500,'#ffcc00');
             this.time.delayedCall(2500,()=>this.scene.start('LobbyScene'));
@@ -240,13 +289,15 @@ class GameScene extends Phaser.Scene {
         if(!this.cursors) return;
         if(this.floorBg) { this.floorBg.tilePositionX+=0.08; this.floorBg.tilePositionY+=0.04; }
 
+        const k = this.cursors || {};
         this.socket.emit('gameInput',{
-            left:this.cursors.A.isDown, right:this.cursors.D.isDown,
-            up:this.cursors.W.isDown,   down:this.cursors.S.isDown
+            left: !!(k.A && k.A.isDown), right: !!(k.D && k.D.isDown),
+            up: !!(k.W && k.W.isDown),   down: !!(k.S && k.S.isDown)
         });
 
         if(Phaser.Input.Keyboard.JustDown(this.keyP)) this._tryShoot();
         if(Phaser.Input.Keyboard.JustDown(this.keyN)) this.socket.emit('reload');
+        if(Phaser.Input.Keyboard.JustDown(this.keyE)) this.socket.emit('useSuper');
 
         if(this.matchEnd && this.timerText) {
             const ms=Math.max(0,this.matchEnd-Date.now()), sec=Math.floor(ms/1000);
@@ -284,69 +335,209 @@ class GameScene extends Phaser.Scene {
     }
 
     updateGameState(state) {
-        // Players
-        for(const id in state.players) {
-            const p=state.players[id];
-            if(!this.players[id]) {
-                this.players[id]=this._createRobot(p);
+        // ============================================================
+        //  PLAYER UPDATE
+        // ============================================================
+        // Create or update players from server state
+        for (const id in state.players) {
+            const p = state.players[id];
+            
+            if (!this.players[id]) {
+                // Player doesn't exist locally - create new robot
+                this.players[id] = this._createRobot(p);
             } else {
-                const c=this.players[id];
-                c.x=Phaser.Math.Linear(c.x,p.x,0.28);
-                c.y=Phaser.Math.Linear(c.y,p.y,0.28);
-                if(c._hpBar) {
-                    const pct = Math.max(0, Math.min(1, me.hp / 5));
-                    if (this.hpBar) {
-                        this.hpBar.width = 120 * pct; 
-                        this.hpBar.x = c.x - 60;
-                        this.hpBar.fillColor = pct > 0.5 ? 0x00ff77 : (pct > 0.25 ? 0xffaa00 : 0xff3300);
+                // Player exists - interpolate position and update visuals
+                const c = this.players[id];
+                
+                // Smooth movement interpolation (28% of distance per frame)
+                c.x = Phaser.Math.Linear(c.x, p.x, 0.28);
+                c.y = Phaser.Math.Linear(c.y, p.y, 0.28);
+                
+                // Update HP bar (max HP = 5)
+                if (c._hpBar) {
+                    const pct = Math.max(0, Math.min(1, p.hp / 5));
+                    c._hpBar.width = pct * 26;
+                    c._hpBar.x = -13; // Keep centered
+                    c._hpBar.fillColor = pct > 0.5 ? 0x00ff77 : (pct > 0.25 ? 0xffaa00 : 0xff3300);
+                    
+                    // Flash visor when taking damage
+                    if (c._lastHp !== undefined && p.hp < c._lastHp) {
+                        if (c._visor) {
+                            this.tweens.add({
+                                targets: c._visor,
+                                alpha: { from: 1, to: 0.1 },
+                                duration: 70,
+                                yoyo: true,
+                                repeat: 2
+                            });
+                        }
+                        // Spawn hit particles
+                        this.particleManager.emitParticleAt(p.x, p.y, 5);
                     }
-                    if(c._lastHp!==undefined && p.hp<c._lastHp) {
-                        if(c._visor) this.tweens.add({targets:c._visor,alpha:{from:1,to:0.1},duration:70,yoyo:true,repeat:2});
+                    c._lastHp = p.hp;
+                }
+                // Update shield/frozen visuals
+                // Shield (invulnerable)
+                if (p.invulnerable && p.invulnerable > 0) {
+                    if (!c._shieldRing) {
+                        c._shieldRing = this.add.ellipse(0, -4, 48, 48, 0xffff88, 0.25).setDepth(21);
+                        c.add(c._shieldRing);
                     }
-                    c._lastHp=p.hp;
+                    // simple pulse
+                    c._shieldRing.alpha = 0.45;
+                } else {
+                    if (c._shieldRing) { c._shieldRing.destroy(); c._shieldRing = null; }
+                }
+
+                // Frost (frozen)
+                if (p.frozen && p.frozen > 0) {
+                    if (!c._frostOverlay) {
+                        c._frostOverlay = this.add.rectangle(0, -4, 48, 48, 0x99ccff, 0.18).setDepth(22);
+                        c.add(c._frostOverlay);
+                    }
+                    // slight tint effect: lower alpha when nearing end
+                    // we can't access exact timer here, keep static
+                } else {
+                    if (c._frostOverlay) { c._frostOverlay.destroy(); c._frostOverlay = null; }
                 }
             }
         }
-        for(const id in this.players) {
-            if(!state.players[id]) { if(this.players[id]?.active) this.players[id].destroy(); delete this.players[id]; }
-        }
-
-        // Bullets
-        this.bullets.forEach(b=>b?.destroy()); this.bullets=[];
-        for(const b of state.bullets) {
-            const isL=b.type==='laser';
-            const bImg=this.add.image(b.x,b.y,isL?'laser':'bullet').setDepth(30).setBlendMode(Phaser.BlendModes.ADD);
-            if(isL && b.dx!==undefined) bImg.setRotation(Math.atan2(b.dy,b.dx));
-            const glow=this.add.ellipse(b.x,b.y,isL?20:14,isL?8:14,isL?0x00ffee:0xff8800,0.35).setDepth(29).setBlendMode(Phaser.BlendModes.ADD);
-            this.bullets.push(bImg,glow);
-        }
-
-        // Powerups sync
-        const present=new Set((state.powerups||[]).map(p=>p.id));
-        for(const id in this.powerups) {
-            if(!present.has(parseInt(id))) {
-                if(this.powerups[id]?._ring) this.powerups[id]._ring.destroy();
-                this.powerups[id]?.destroy(); delete this.powerups[id];
+        
+        // Remove players that no longer exist on server (died/disconnected)
+        for (const id in this.players) {
+            if (!state.players[id]) {
+                if (this.players[id]?.active) {
+                    // Spawn death effect before destroying
+                    const player = this.players[id];
+                    this._spawnDeathExplosion(player.x, player.y, player._primaryColor || 0xff4400);
+                    player.destroy();
+                }
+                delete this.players[id];
             }
         }
 
-        // Obstacles
-        this.obstacles.forEach(o=>o?.destroy()); this.obstacles=[];
-        for(const obs of (state.obstacles||[])) {
-            this.obstacles.push(this.add.image(obs.x+obs.w/2,obs.y+obs.h/2,'moving_obs').setDisplaySize(obs.w,obs.h).setDepth(6));
+        // ============================================================
+        //  BULLETS UPDATE
+        // ============================================================
+        // Clear old bullets
+        this.bullets.forEach(b => b?.destroy());
+        this.bullets = [];
+        
+        // Create new bullets from server state (render below obstacles so moving walls act as cover)
+        for (const b of state.bullets) {
+            const isLaser = b.type === 'laser';
+            
+            // Bullet sprite
+            const bulletImg = this.add.image(b.x, b.y, isLaser ? 'laser' : 'bullet')
+                .setDepth(12)
+                .setBlendMode(Phaser.BlendModes.ADD);
+            
+            // Rotate laser to face direction
+            if (isLaser && b.vx !== undefined && b.vy !== undefined) {
+                bulletImg.setRotation(Math.atan2(b.vy, b.vx));
+            }
+            
+            // Glow effect
+            const glowSize = isLaser ? { w: 20, h: 8 } : { w: 14, h: 14 };
+            const glowColor = isLaser ? 0x00ffee : 0xff8800;
+            const glow = this.add.ellipse(b.x, b.y, glowSize.w, glowSize.h, glowColor, 0.35)
+                .setDepth(11)
+                .setBlendMode(Phaser.BlendModes.ADD);
+            
+            this.bullets.push(bulletImg, glow);
         }
 
-        // My HUD
-        const me=state.players?.[this.playerId];
-        if(me) {
-            const pct=Math.max(0,Math.min(1,me.hp/100));
-            if(this.hpBar) { this.hpBar.width=120*pct; this.hpBar.fillColor=pct>0.5?0x00ff77:(pct>0.25?0xffaa00:0xff3300); }
-            if(this.hpText) this.hpText.setText(me.hp);
-            if(this.ammoText) {
-                const rl=me.reloadTimer&&me.reloadTimer>0;
-                this.ammoText.setText(rl?'⟳ RELOAD':`${me.ammo??'─'}`);
-                this.ammoText.setColor(rl?'#ff8833':'#ffdd22');
+        // ============================================================
+        //  POWERUPS UPDATE
+        // ============================================================
+        // Create a Set of powerup IDs that exist on server
+        const serverPowerupIds = new Set((state.powerups || []).map(p => p.id));
+        
+        // Remove powerups that no longer exist on server
+        for (const id in this.powerups) {
+            if (!serverPowerupIds.has(parseInt(id))) {
+                if (this.powerups[id]?._ring) {
+                    this.powerups[id]._ring.destroy();
+                }
+                this.powerups[id]?.destroy();
+                delete this.powerups[id];
             }
+        }
+        
+        // Note: New powerups are created via 'powerupSpawned' event, not here
+        // The server sends 'powerupSpawned' separately for visual effects
+
+        // ============================================================
+        //  OBSTACLES UPDATE
+        // ============================================================
+        // Clear old obstacles
+        this.obstacles.forEach(o => o?.destroy());
+        this.obstacles = [];
+        
+        // Create new obstacles from server state (render above bullets so they act as cover)
+        for (const obs of (state.obstacles || [])) {
+            const obstacleImg = this.add.image(
+                obs.x + obs.w / 2,
+                obs.y + obs.h / 2,
+                'moving_obs'
+            )
+            .setDisplaySize(obs.w, obs.h)
+            .setDepth(15);
+            
+            this.obstacles.push(obstacleImg);
+        }
+
+        // ============================================================
+        //  PLAYER HUD (MY STATS)
+        // ============================================================
+        const me = state.players?.[this.playerId];
+        
+        if (me) {
+            // Update HP bar (max HP = 5)
+            const hpPercent = Math.max(0, Math.min(1, me.hp / 5));
+            if (this.hpBar) {
+                this.hpBar.width = 120 * hpPercent;
+                this.hpBar.fillColor = hpPercent > 0.5 ? 0x00ff77 : (hpPercent > 0.25 ? 0xffaa00 : 0xff3300);
+            }
+            if (this.hpText) {
+                this.hpText.setText(me.hp);
+            }
+            
+            // Update ammo display
+            if (this.ammoText) {
+                const isReloading = me.reloadTimer && me.reloadTimer > 0;
+                if (isReloading) {
+                    this.ammoText.setText('⟳ RELOAD');
+                    this.ammoText.setColor('#ff8833');
+                } else {
+                    this.ammoText.setText(`${me.ammo ?? '─'} / ${this.maxAmmo || 6}`);
+                    this.ammoText.setColor('#ffdd22');
+                }
+            }
+            if (this.superText) {
+                const cd = Math.max(0, Math.ceil((me.superCooldown || 0)));
+                this.superText.setText(cd > 0 ? `${cd}s` : 'READY');
+                this.superText.setColor(cd > 0 ? '#ff88ff' : '#88ff88');
+            }
+        } else {
+            // Player is dead or not in game - show empty stats
+            if (this.hpBar) this.hpBar.width = 0;
+            if (this.hpText) this.hpText.setText('0');
+            if (this.ammoText) {
+                this.ammoText.setText('──');
+                this.ammoText.setColor('#446677');
+            }
+        }
+
+        // ============================================================
+        //  ROUND/TIMER UPDATE (optional, from server)
+        // ============================================================
+        if (state.roundNumber !== undefined && this.roundText) {
+            this.roundText.setText(`ROUND ${state.roundNumber}`);
+        }
+        
+        if (state.scores && this.scoreText) {
+            this._refreshRoundHUD(); // This uses this.scores, which should be updated elsewhere
         }
     }
 
@@ -389,6 +580,10 @@ class GameScene extends Phaser.Scene {
 
         c._legL=legL; c._legR=legR; c._footL=footL; c._footR=footR;
         c._body=body; c._head=head; c._visor=visor; c._hpBar=hpBar; c._lastHp=p.hp;
+
+        // Status overlays (shield/frost)
+        c._shieldRing = null;
+        c._frostOverlay = null;
 
         // Antenna pulse
         this.tweens.add({targets:antT,alpha:{from:0.5,to:1},scale:{from:0.7,to:1.3},duration:900+Math.random()*400,ease:'Sine.easeInOut',yoyo:true,repeat:-1});

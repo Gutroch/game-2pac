@@ -40,6 +40,12 @@ io.on('connection', (socket) => {
         const player = playerManager.addPlayer(socket.id, nickname, character);
         socket.emit('init', { playerId: socket.id, nickname: player.nickname, character: player.character });
 
+        // Ensure player's character stored in player manager
+        if (character) {
+            const p = playerManager.getPlayer(socket.id);
+            if (p) p.character = character;
+        }
+
         // Invia la lista delle stanze pubbliche
         socket.emit('roomList', roomManager.getPublicRoomsInfo());
 
@@ -50,6 +56,19 @@ io.on('connection', (socket) => {
     // Richiesta lista stanze
     socket.on('getRooms', () => {
         socket.emit('roomList', roomManager.getPublicRoomsInfo());
+    });
+
+    // Client can update selected character before match
+    socket.on('setCharacter', (charId) => {
+        const p = playerManager.getPlayer(socket.id);
+        if (p) {
+            p.character = charId;
+            // If in room, broadcast updated room info
+            if (p.currentRoom) {
+                const room = roomManager.getRoom(p.currentRoom);
+                if (room) io.to(room.id).emit('roomUpdated', room.getInfo());
+            }
+        }
     });
 
     // Creazione stanza
@@ -183,6 +202,15 @@ io.on('connection', (socket) => {
 
         // Delegare al game engine
         room.gameEngine.handleShoot(socket.id, dir);
+    });
+
+    // Super ability
+    socket.on('useSuper', () => {
+        const player = playerManager.getPlayer(socket.id);
+        if (!player || !player.currentRoom) return;
+        const room = roomManager.getRoom(player.currentRoom);
+        if (!room || !room.gameEngine) return;
+        room.gameEngine.handleUseSuper(socket.id);
     });
 
     socket.on('reload', () => {
