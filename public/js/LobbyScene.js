@@ -1,83 +1,382 @@
+// ============================================================
+//  LOBBY SCENE — CYBERPUNK TERMINAL (Enhanced Edition)
+// ============================================================
 class LobbyScene extends Phaser.Scene {
-    constructor() {
-        super({ key: 'LobbyScene' });
-    }
+    constructor() { super({ key: 'LobbyScene' }); }
 
     init() {
-        this.socket = this.registry.get('socket');
-        this.nickname = this.registry.get('nickname');
-        this.rooms = [];
+        this.socket      = this.registry.get('socket');
+        this.nickname    = this.registry.get('nickname');
+        this.rooms       = [];
         this.currentRoom = null;
     }
 
+    preload() {
+        // Reuse textures from GameScene if available, otherwise generate
+        if (!this.textures.exists('floor_tile')) this._genBasicTextures();
+    }
+
+    _genBasicTextures() {
+        const g = this.make.graphics({ add: false });
+        g.fillStyle(0x04090f); g.fillRect(0,0,32,32);
+        g.lineStyle(1,0x0d2040,1); g.strokeRect(0,0,32,32);
+        g.generateTexture('floor_tile',32,32); g.clear();
+        g.destroy();
+    }
+
     create() {
-        // Retro CRT-style background
-        this.add.rectangle(0, 0, 640, 480, 0x071215).setOrigin(0);
-        // scanlines overlay
-        const scan = this.add.graphics({ x: 0, y: 0 });
-        scan.fillStyle(0x000000, 0.06);
-        for (let y = 0; y < 480; y += 4) {
-            scan.fillRect(0, y, 640, 1);
+        this._drawBackground();
+        this._drawUI();
+        this._setupCharPreviews();
+        this._setupSocketListeners();
+
+        if (!this.nickname) {
+            this.showNicknameModal();
+        } else {
+            this.socket.emit('setNickname', this.nickname);
+            this.socket.emit('getRooms');
+        }
+    }
+
+    // ── BACKGROUND ───────────────────────────────────────────
+    _drawBackground() {
+        // Dark base
+        this.add.rectangle(0,0,640,480,0x020810).setOrigin(0);
+
+        // Scrolling floor tiles
+        this.floorBg = this.add.tileSprite(0,0,640,480,'floor_tile').setOrigin(0).setAlpha(0.7);
+
+        // Horizontal glow bars (decorative)
+        for (let i = 0; i < 4; i++) {
+            const y = 80 + i * 110;
+            this.add.rectangle(0, y, 640, 1, 0x0a2040, 0.6).setOrigin(0);
         }
 
-        // Vignette border
-        const vignette = this.add.graphics();
-        vignette.lineStyle(4, 0x224422, 1);
-        vignette.strokeRect(6, 6, 628, 468);
+        // Top & bottom neon borders
+        const topGlow = this.add.graphics();
+        topGlow.lineStyle(2, 0x00ddff, 0.8);
+        topGlow.lineBetween(0, 44, 640, 44);
+        topGlow.lineStyle(1, 0x00ddff, 0.3);
+        topGlow.lineBetween(0, 46, 640, 46);
 
-        // Titolo nello stile terminale
-        this.add.text(24, 18, 'TERMINAL LOBBY', { fill: '#7CFF7C', fontSize: '28px', fontFamily: 'VT323, monospace' });
+        const botGlow = this.add.graphics();
+        botGlow.lineStyle(2, 0x00ddff, 0.8);
+        botGlow.lineBetween(0, 436, 640, 436);
+        botGlow.lineStyle(1, 0x00ddff, 0.3);
+        botGlow.lineBetween(0, 434, 640, 434);
 
-        // Pannello stanze pubbliche
-        this.add.text(24, 64, 'STANZE PUBBLICHE', { fill: '#7CFF7C', fontSize: '14px', fontFamily: 'VT323, monospace' });
-        this.roomsContainer = this.add.container(24, 92);
+        // Left panel border
+        const panelBorder = this.add.graphics();
+        panelBorder.lineStyle(1, 0x1a4488, 0.7);
+        panelBorder.strokeRect(8, 52, 310, 375);
 
-        // Selezione personaggio (mini PC retro)
-        this.availableChars = [
-            { id: 'pc_blue', color: 0x3366ff },
-            { id: 'pc_red', color: 0xff3333 },
-            { id: 'pc_green', color: 0x33ff99 },
-            { id: 'pc_yellow', color: 0xffcc33 }
-        ];
-        this.selectedChar = localStorage.getItem('selectedChar') || this.availableChars[0].id;
-        const charsX = 24; let cx = charsX, cy = 320;
-        this.add.text(cx, cy-18, 'Scegli personaggio:', { fill: '#7CFF7C', fontFamily: 'VT323, monospace' });
-        this.charIcons = {};
-        this.charContainer = this.add.container(0,0);
-        for (let ch of this.availableChars) {
-            const box = this.add.rectangle(cx, cy, 40, 32, 0x001000).setOrigin(0,0).setInteractive({ useHandCursor: true });
-            const screen = this.add.rectangle(cx+6, cy+6, 28, 20, ch.color).setOrigin(0,0);
-            const label = this.add.text(cx+46, cy+8, ch.id.replace('pc_',''), { fill: '#7CFF7C', fontFamily: 'VT323, monospace' });
-            box.on('pointerdown', () => { this.selectCharacter(ch.id); });
-            this.charContainer.add([box, screen, label]);
-            this.charIcons[ch.id] = { box, screen };
-            cx += 160;
+        // Right panel border
+        panelBorder.strokeRect(322, 52, 310, 375);
+
+        // Scanlines
+        const scan = this.make.graphics({ add: false });
+        scan.fillStyle(0x000000, 0.035);
+        for (let y = 0; y < 480; y += 3) scan.fillRect(0, y, 640, 1);
+        scan.generateTexture('scanlines_lobby', 640, 480);
+        scan.destroy();
+        this.add.image(0,0,'scanlines_lobby').setOrigin(0).setAlpha(0.8).setDepth(200);
+
+        // Vignette
+        const vg = this.add.graphics().setDepth(198);
+        for (let i = 0; i < 25; i++) {
+            vg.fillStyle(0x000000, i/25*0.5);
+            vg.fillRect(i,i,640-i*2,2); vg.fillRect(i,478-i,640-i*2,2);
+            vg.fillRect(i,i,2,480-i*2); vg.fillRect(638-i,i,2,480-i*2);
         }
-        this.updateCharSelectionVisual();
 
-        // Pulsante crea stanza (retro button)
-        const createBtn = this.add.rectangle(24 + 6, 400, 180, 28, 0x112211).setOrigin(0);
-        const createBtnText = this.add.text(24 + 12, 404, 'CREA NUOVA STANZA', { fill: '#7CFF7C', fontSize: '14px', fontFamily: 'VT323, monospace' });
-        createBtn.setInteractive({ useHandCursor: true }).on('pointerdown', () => this.showCreateRoomModal());
+        // Title
+        const title = this.add.text(320, 12, '⚡ CYBER ARENA ⚡', {
+            fontFamily: 'VT323, monospace', fontSize: '32px',
+            color: '#00ddff', stroke: '#003355', strokeThickness: 3
+        }).setOrigin(0.5, 0);
 
-        // Join by code input
-        this.add.text(24, 360, 'Entra con codice stanza:', { fill: '#7CFF7C', fontFamily: 'VT323, monospace' });
-        const joinInput = this.add.dom(220, 368).createFromHTML('<input id="joinCode" placeholder="XXXXXX" style="width:120px;font-family:VT323,monospace;background:#001;color:#7CFF7C;border:1px solid #224;padding:6px">');
-        const joinBtn = this.add.text(360, 364, 'JOIN', { fill: '#7CFF7C', fontFamily: 'VT323, monospace' }).setInteractive({ useHandCursor: true });
+        // Pulsing title glow
+        this.tweens.add({ targets: title, alpha: { from: 0.8, to: 1 }, scaleX: { from: 0.98, to: 1.01 }, scaleY: { from: 0.98, to: 1.01 }, duration: 1500, ease: 'Sine.easeInOut', yoyo: true, repeat: -1 });
+
+        // Player nickname display (top right)
+        this.nickDisplay = this.add.text(620, 12, this.nickname ? `USER: ${this.nickname}` : '', {
+            fontFamily: 'VT323, monospace', fontSize: '14px', color: '#44ff88'
+        }).setOrigin(1, 0);
+    }
+
+    // ── MAIN UI ───────────────────────────────────────────────
+    _drawUI() {
+        // Left panel: room list
+        this.add.text(14, 56, 'BATTLE ROOMS', {
+            fontFamily: 'VT323, monospace', fontSize: '16px', color: '#00ddff'
+        });
+        this.add.graphics().lineStyle(1, 0x00ddff, 0.4).lineBetween(14, 72, 312, 72);
+
+        this.roomsContainer = this.add.container(14, 78);
+
+        // Create room button
+        const cBtn = this.add.text(14, 405, '[ + CREATE NEW ROOM ]', {
+            fontFamily: 'VT323, monospace', fontSize: '15px', color: '#00ff77',
+            backgroundColor: '#001a0d', padding: { x: 8, y: 5 }
+        }).setInteractive({ useHandCursor: true });
+        cBtn.on('pointerover', () => cBtn.setColor('#88ffcc'));
+        cBtn.on('pointerout',  () => cBtn.setColor('#00ff77'));
+        cBtn.on('pointerdown', () => this.showCreateRoomModal());
+
+        // Join by code
+        this.add.text(14, 430, 'JOIN CODE:', { fontFamily: 'VT323, monospace', fontSize: '13px', color: '#88aacc' });
+        const joinDom = this.add.dom(170, 438).createFromHTML(
+            '<input id="joinCode" maxlength="6" placeholder="XXXXXX" style="width:90px;font-family:VT323,monospace;font-size:14px;background:#001122;color:#00ddff;border:1px solid #224466;padding:4px;letter-spacing:2px;text-transform:uppercase">'
+        );
+        const joinBtn = this.add.text(250, 430, '[JOIN]', {
+            fontFamily: 'VT323, monospace', fontSize: '14px', color: '#ffdd22'
+        }).setInteractive({ useHandCursor: true });
         joinBtn.on('pointerdown', () => {
-            const code = joinInput.node.querySelector('#joinCode').value.trim().toUpperCase();
-            if (!code) { this.showToast('Inserisci codice stanza', 1500); return; }
+            const code = joinDom.node.querySelector('#joinCode').value.trim().toUpperCase();
+            if (!code) { this.showToast('Enter room code', 1500); return; }
             this.socket.emit('joinRoomByCode', code);
         });
 
-        // Pannello stanza corrente (se dentro una stanza)
-        this.roomPanel = this.add.container(320, 92);
+        // Right panel: current room
+        this.add.text(328, 56, 'CURRENT ROOM', {
+            fontFamily: 'VT323, monospace', fontSize: '16px', color: '#00ddff'
+        });
+        this.add.graphics().lineStyle(1, 0x00ddff, 0.4).lineBetween(328, 72, 626, 72);
+
+        this.roomPanel = this.add.container(328, 78);
         this.roomPanel.setVisible(false);
 
-        // Ascoltatori socket
-        this.socket.on('init', (data) => {
-            this.registry.set('playerId', data.playerId);
+        // Logout
+        const logBtn = this.add.text(620, 445, '[EXIT]', {
+            fontFamily: 'VT323, monospace', fontSize: '13px', color: '#ff6644',
+            backgroundColor: '#110500', padding: { x: 6, y: 4 }
+        }).setOrigin(1, 0).setInteractive({ useHandCursor: true });
+        logBtn.on('pointerdown', () => this.doLogout());
+    }
+
+    // ── CHARACTER SELECTION WITH ANIMATED PREVIEWS ───────────
+    _setupCharPreviews() {
+        this.add.text(14, 340, 'SELECT UNIT:', {
+            fontFamily: 'VT323, monospace', fontSize: '14px', color: '#88aacc'
         });
+
+        this.availableChars = [
+            { id: 'pc_blue',   primary: 0x22aaff, secondary: 0x0055aa, label: 'BYTE' },
+            { id: 'pc_red',    primary: 0xff3344, secondary: 0xaa0011, label: 'CORE' },
+            { id: 'pc_green',  primary: 0x22ffaa, secondary: 0x008844, label: 'HACK' },
+            { id: 'pc_yellow', primary: 0xffdd22, secondary: 0xaa8800, label: 'ZOLT' },
+        ];
+        this.selectedChar = localStorage.getItem('selectedChar') || this.availableChars[0].id;
+
+        this.charSelections = {};
+        let cx = 20;
+
+        for (const ch of this.availableChars) {
+            const x = cx, y = 380;
+            // Card background
+            const cardBg = this.add.rectangle(x+32, y, 64, 52, 0x030c16).setOrigin(0.5);
+            const cardBorder = this.add.graphics();
+            cardBorder.lineStyle(1, ch.primary, 0.5);
+            cardBorder.strokeRect(x, y-26, 64, 52);
+
+            // Mini robot preview (simplified, using shapes)
+            const previewContainer = this._createMiniRobotPreview(x + 32, y - 4, ch.primary, ch.secondary);
+
+            // Label
+            const label = this.add.text(x+32, y+24, ch.label, {
+                fontFamily: 'VT323, monospace', fontSize: '12px', color: '#'+ch.primary.toString(16).padStart(6,'0')
+            }).setOrigin(0.5, 0);
+
+            // Clickable area
+            const hitArea = this.add.rectangle(x+32, y, 64, 52, 0x000000, 0)
+                .setOrigin(0.5).setInteractive({ useHandCursor: true });
+
+            hitArea.on('pointerdown', () => this._selectChar(ch.id));
+            hitArea.on('pointerover', () => { cardBg.setFillStyle(0x0a1e30); });
+            hitArea.on('pointerout',  () => { cardBg.setFillStyle(0x030c16); });
+
+            this.charSelections[ch.id] = { cardBg, cardBorder, label, previewContainer };
+            cx += 70;
+        }
+
+        this._updateCharVisual();
+    }
+
+    _createMiniRobotPreview(x, y, pColor, sColor) {
+        // Antenna
+        const antS = this.add.rectangle(x, y-20, 1, 5, 0x445566);
+        const antT = this.add.ellipse(x, y-23, 4, 4, pColor, 0.9);
+        antT.setBlendMode(Phaser.BlendModes.ADD);
+        this.tweens.add({ targets: antT, alpha: { from: 0.4, to: 1 }, scale: { from: 0.7, to: 1.2 }, duration: 900, ease: 'Sine.easeInOut', yoyo: true, repeat: -1 });
+
+        // Head
+        const head = this.add.rectangle(x, y-12, 12, 8, 0x0d1525);
+        head.setStrokeStyle(1, sColor, 0.7);
+        const visor = this.add.rectangle(x, y-12, 9, 5, pColor, 0.8);
+        visor.setBlendMode(Phaser.BlendModes.ADD);
+
+        // Body
+        const body = this.add.rectangle(x, y-3, 14, 9, 0x0d1525);
+        body.setStrokeStyle(1, sColor, 0.6);
+        const chest = this.add.ellipse(x, y-3, 7, 7, pColor, 0.35);
+        chest.setBlendMode(Phaser.BlendModes.ADD);
+        this.tweens.add({ targets: chest, alpha: { from: 0.15, to: 0.5 }, duration: 1100, ease: 'Sine.easeInOut', yoyo: true, repeat: -1 });
+
+        // Legs (animated walk)
+        const legL = this.add.rectangle(x-3, y+5, 4, 7, 0x1a1a2e);
+        const legR = this.add.rectangle(x+3, y+5, 4, 7, 0x1a1a2e);
+        this.tweens.add({ targets: legL, y: y+5+3, duration: 300, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+        this.tweens.add({ targets: legR, y: y+5-3, duration: 300, yoyo: true, repeat: -1, ease: 'Sine.easeInOut', delay: 150 });
+
+        return [antS, antT, body, chest, head, visor, legL, legR];
+    }
+
+    _selectChar(id) {
+        this.selectedChar = id;
+        localStorage.setItem('selectedChar', id);
+        this._updateCharVisual();
+        const ch = this.availableChars.find(c => c.id === id);
+        if (ch) this.socket.emit('setCharacter', id);
+    }
+
+    _updateCharVisual() {
+        for (const ch of this.availableChars) {
+            const s = this.charSelections?.[ch.id];
+            if (!s) continue;
+            if (this.selectedChar === ch.id) {
+                s.cardBorder.clear();
+                s.cardBorder.lineStyle(2, ch.primary, 1);
+                s.cardBorder.strokeRect(
+                    this.charSelections[ch.id].cardBg.x - 32,
+                    this.charSelections[ch.id].cardBg.y - 26,
+                    64, 52
+                );
+                s.cardBg.setFillStyle(0x081828);
+            } else {
+                s.cardBorder.clear();
+                s.cardBorder.lineStyle(1, ch.primary, 0.4);
+                s.cardBorder.strokeRect(
+                    this.charSelections[ch.id].cardBg.x - 32,
+                    this.charSelections[ch.id].cardBg.y - 26,
+                    64, 52
+                );
+                s.cardBg.setFillStyle(0x030c16);
+            }
+        }
+    }
+
+    // ── ROOM LIST ─────────────────────────────────────────────
+    updateRoomsList() {
+        this.roomsContainer.removeAll(true);
+        if (this.rooms.length === 0) {
+            this.roomsContainer.add(this.add.text(0, 0, 'No rooms. Create one!', {
+                fontFamily: 'VT323, monospace', fontSize: '13px', color: '#446677'
+            }));
+            return;
+        }
+        let y = 0;
+        for (const room of this.rooms) {
+            const isFull = room.playerCount >= room.maxPlayers;
+            const modeIcon = room.mode === 'teamDM' ? '⚔' : '☠';
+            const txt = `${modeIcon} ${room.name}  [${room.mode.toUpperCase()}]  ${room.playerCount}/${room.maxPlayers}`;
+            const bg = this.add.rectangle(0, y, 296, 24, 0x050f1a).setOrigin(0, 0);
+            const btn = this.add.text(6, y + 3, txt, {
+                fontFamily: 'VT323, monospace',
+                fontSize: '13px',
+                color: isFull ? '#446677' : '#aaddff'
+            });
+            if (!isFull) {
+                bg.setInteractive({ useHandCursor: true });
+                bg.on('pointerover', () => { bg.setFillStyle(0x0a2035); btn.setColor('#00ddff'); });
+                bg.on('pointerout',  () => { bg.setFillStyle(0x050f1a); btn.setColor('#aaddff'); });
+                bg.on('pointerdown', () => this.socket.emit('joinRoom', room.id));
+            }
+            // Accent line
+            const accent = this.add.graphics();
+            accent.lineStyle(1, isFull ? 0x224444 : 0x224466, 0.8);
+            accent.lineBetween(0, y + 24, 296, y + 24);
+
+            this.roomsContainer.add([bg, btn, accent]);
+            y += 26;
+        }
+    }
+
+    updateRoomPanel() {
+        this.roomPanel.removeAll(true);
+        const room = this.currentRoom;
+        if (!room) return;
+
+        const myId = this.registry.get('playerId');
+
+        // Room title
+        this.roomPanel.add(this.add.text(0, 0, room.name, {
+            fontFamily: 'VT323, monospace', fontSize: '18px', color: '#ffdd22'
+        }));
+        this.roomPanel.add(this.add.text(0, 20, `MODE: ${room.mode.toUpperCase()}  |  ${room.playerCount}/${room.maxPlayers} PLAYERS`, {
+            fontFamily: 'VT323, monospace', fontSize: '12px', color: '#88aacc'
+        }));
+
+        // Separator
+        const sep = this.add.graphics();
+        sep.lineStyle(1, 0x224466, 0.7);
+        sep.lineBetween(0, 36, 296, 36);
+        this.roomPanel.add(sep);
+
+        // Player list
+        let y = 44;
+        for (const p of room.players) {
+            const col = p.ready ? '#00ff77' : '#ff4444';
+            const icon = p.ready ? '✓' : '○';
+            const isMe = p.id === myId;
+            const playerLine = this.add.text(0, y, `${icon} ${p.nickname}${isMe ? ' (YOU)' : ''}`, {
+                fontFamily: 'VT323, monospace', fontSize: '14px', color: col
+            });
+            this.roomPanel.add(playerLine);
+            y += 22;
+        }
+
+        // Ready button
+        const me = room.players.find(p => p.id === myId);
+        if (me && !me.ready) {
+            const readyBtn = this.add.text(0, y + 8, '[ READY TO FIGHT ]', {
+                fontFamily: 'VT323, monospace', fontSize: '15px', color: '#00ff77',
+                backgroundColor: '#001a0d', padding: { x: 8, y: 5 }
+            }).setInteractive({ useHandCursor: true });
+            readyBtn.on('pointerover', () => readyBtn.setColor('#88ffcc'));
+            readyBtn.on('pointerout',  () => readyBtn.setColor('#00ff77'));
+            readyBtn.on('pointerdown', () => this.socket.emit('playerReady'));
+            this.roomPanel.add(readyBtn);
+            y += 32;
+        }
+
+        // Leave button
+        const leaveBtn = this.add.text(0, y + 16, '[ LEAVE ROOM ]', {
+            fontFamily: 'VT323, monospace', fontSize: '13px', color: '#ff4444',
+            backgroundColor: '#160000', padding: { x: 8, y: 4 }
+        }).setInteractive({ useHandCursor: true });
+        leaveBtn.on('pointerdown', () => this.socket.emit('leaveRoom'));
+        this.roomPanel.add(leaveBtn);
+        y += 28;
+
+        // Private room code
+        if (room.isPrivate && room.ownerId === myId && room.joinCode) {
+            this.roomPanel.add(this.add.text(0, y + 16, `ROOM CODE: ${room.joinCode}`, {
+                fontFamily: 'VT323, monospace', fontSize: '13px', color: '#ffdd22'
+            }));
+            const copyBtn = this.add.text(0, y + 36, '[ COPY CODE ]', {
+                fontFamily: 'VT323, monospace', fontSize: '12px', color: '#00ddff',
+                backgroundColor: '#001122', padding: { x: 6, y: 3 }
+            }).setInteractive({ useHandCursor: true });
+            copyBtn.on('pointerdown', () => {
+                try { navigator.clipboard.writeText(room.joinCode); this.showToast('Code copied!', 1500); } catch(e) {}
+            });
+            this.roomPanel.add(copyBtn);
+        }
+    }
+
+    // ── SOCKET LISTENERS ──────────────────────────────────────
+    _setupSocketListeners() {
+        this.socket.on('init', (data) => this.registry.set('playerId', data.playerId));
 
         this.socket.on('roomList', (rooms) => {
             this.rooms = rooms;
@@ -86,7 +385,6 @@ class LobbyScene extends Phaser.Scene {
 
         this.socket.on('nickRejected', (msg) => {
             this.showToast(msg, 3000);
-            // reopen nickname modal
             this.showNicknameModal();
         });
 
@@ -102,17 +400,14 @@ class LobbyScene extends Phaser.Scene {
         });
 
         this.socket.on('roomLeft', (data) => {
-            const myId = this.registry.get('playerId');
-            if (data.playerId === myId) {
+            if (data.playerId === this.registry.get('playerId')) {
                 this.currentRoom = null;
                 this.roomPanel.setVisible(false);
             } else {
-                // Aggiorna lista stanze quando un altro player lascia
                 this.socket.emit('getRooms');
             }
         });
 
-        // Evento per il giocatore che ha lasciato (risposta diretta del server)
         this.socket.on('leftRoom', () => {
             this.currentRoom = null;
             this.roomPanel.setVisible(false);
@@ -120,213 +415,132 @@ class LobbyScene extends Phaser.Scene {
         });
 
         this.socket.on('gameStarting', (data) => {
-            // Passa i dati alla scena di gioco
             this.registry.set('gameData', data);
-            this.scene.start('GameScene');
+            this._showCountdownAndStart(data);
         });
 
-        this.socket.on('error', (msg) => {
-            this.showToast('Errore: ' + msg, 3000);
-        });
-
-        // Se non abbiamo nickname, chiedilo in schermata, altrimenti invia subito al server
-        if (!this.nickname) {
-            this.showNicknameModal();
-        } else {
-            this.socket.emit('setNickname', this.nickname);
-            this.socket.emit('getRooms');
-        }
-
-        // piccolo container per toast
-        this.toastGroup = this.add.group();
-
-        // Pulsante logout top-right
-        const logoutRect = this.add.rectangle(620, 12, 36, 18, 0x112211).setOrigin(1,0);
-        const logoutText = this.add.text(612, 14, 'EXIT', { fontFamily: 'VT323, monospace', fontSize: '12px', color: '#FFAA88' }).setOrigin(1,0);
-        logoutRect.setInteractive({ useHandCursor: true }).on('pointerdown', () => this.doLogout());
+        this.socket.on('error', (msg) => this.showToast('ERROR: ' + msg, 3000));
     }
 
-    updateRoomsList() {
-        this.roomsContainer.removeAll(true);
-        let y = 0;
-        for (let room of this.rooms) {
-            const text = `${room.name} (${room.mode}) - ${room.playerCount}/${room.maxPlayers}`;
-            const btn = this.add.text(0, y, text, { fill: '#fff', backgroundColor: '#444', padding: { x: 5, y: 2 } })
-                .setInteractive()
-                .on('pointerdown', () => {
-                    this.socket.emit('joinRoom', room.id);
-                });
-            this.roomsContainer.add(btn);
-            y += 30;
-        }
-    }
+    _showCountdownAndStart(data) {
+        // Dramatic countdown overlay
+        const overlay = this.add.rectangle(0,0,640,480,0x000000,0).setOrigin(0).setDepth(300);
+        this.tweens.add({ targets: overlay, alpha: 0.7, duration: 200 });
 
-    updateRoomPanel() {
-        this.roomPanel.removeAll(true);
-        const room = this.currentRoom;
-        if (!room) return;
+        const msg = this.add.text(320, 200, 'MATCH STARTING', {
+            fontFamily: 'VT323, monospace', fontSize: '36px', color: '#00ddff',
+            stroke: '#003355', strokeThickness: 3
+        }).setOrigin(0.5).setDepth(301).setAlpha(0);
 
-        // Titolo stanza
-        this.roomPanel.add(this.add.text(0, 0, `Stanza: ${room.name} (${room.mode})`, { fill: '#ff0' }));
+        this.tweens.add({ targets: msg, alpha: 1, scaleX: { from: 0.5, to: 1 }, scaleY: { from: 0.5, to: 1 }, duration: 400, ease: 'Back.easeOut' });
 
-        // Lista giocatori
-        let y = 30;
-        for (let p of room.players) {
-            const readyText = p.ready ? 'Pronto' : 'Non pronto';
-            const color = p.ready ? '#0f0' : '#f00';
-            const text = `${p.nickname} - ${readyText}`;
-            this.roomPanel.add(this.add.text(10, y, text, { fill: color }));
-            y += 20;
-        }
+        let count = 3;
+        const countTxt = this.add.text(320, 280, String(count), {
+            fontFamily: 'VT323, monospace', fontSize: '72px', color: '#ffdd22'
+        }).setOrigin(0.5).setDepth(301);
 
-        // Pulsante ready (se non già pronto)
-        myId = this.registry.get('playerId');
-        const me = room.players.find(p => p.id === myId);
-        if (me && !me.ready) {
-            const readyBtn = this.add.text(10, y + 10, 'Pronto', { fill: '#0f0', backgroundColor: '#333', padding: { x: 10, y: 5 } })
-                .setInteractive()
-                .on('pointerdown', () => {
-                    this.socket.emit('playerReady');
-                });
-            this.roomPanel.add(readyBtn);
-        }
-
-        // Pulsante esci
-        const leaveBtn = this.add.text(10, y + 50, 'Esci', { fill: '#f00', backgroundColor: '#333', padding: { x: 10, y: 5 } })
-            .setInteractive()
-            .on('pointerdown', () => {
-                this.socket.emit('leaveRoom');
-            });
-        this.roomPanel.add(leaveBtn);
-
-        // If owner and private, show join code with copy button
-        if (room.isPrivate && room.ownerId === myId) {
-            const codeText = this.add.text(10, y + 80, `Codice stanza: ${room.joinCode || '---'}`, { fill: '#7CFF7C', fontFamily: 'VT323, monospace' });
-            const copyBtn = this.add.text(10, y + 100, 'Copia codice', { fill: '#0ff', backgroundColor: '#002', padding: { x:8, y:4 } }).setInteractive({ useHandCursor: true });
-            copyBtn.on('pointerdown', () => {
-                try { navigator.clipboard.writeText(room.joinCode || ''); this.showToast('Codice copiato negli appunti', 1500); } catch (e) { this.showToast('Copia non supportata', 1500); }
-            });
-            this.roomPanel.add([codeText, copyBtn]);
-            y += 40;
-        }
-    }
-
-        showCreateRoomModal() {
-                const html = `
-                <div style="font-family: VT323, monospace; color: #7CFF7C; background:#04110b; padding:12px; border:2px solid #133; width:360px">
-                    <form id="createRoomForm">
-                        <div style="margin-bottom:8px">Nome stanza:<br><input name="roomName" style="width:100%; font-family: VT323, monospace; background:#001; color:#7CFF7C; border:1px solid #224; padding:4px" /></div>
-                        <div style="margin-bottom:8px">Modalità:<br>
-                            <select name="mode" id="modeSel" style="width:100%; font-family: VT323, monospace; background:#001; color:#7CFF7C; border:1px solid #224; padding:4px">
-                                <option value="teamDM">Team DM</option>
-                                <option value="ffa">FFA</option>
-                            </select>
-                        </div>
-                        <div style="margin-bottom:8px">Max giocatori:<br><input type="number" name="maxPlayers" min="2" max="12" value="4" style="width:100%; font-family:VT323,monospace;background:#001;color:#7CFF7C;border:1px solid #224;padding:4px" /></div>
-                        <div style="margin-bottom:8px">Numero squadre (solo teamDM):<br><input type="number" name="numTeams" min="2" max="4" value="2" style="width:100%; font-family:VT323,monospace;background:#001;color:#7CFF7C;border:1px solid #224;padding:4px" /></div>
-                        <div style="margin-bottom:8px"><label><input type="checkbox" name="isPrivate" /> Stanza privata</label></div>
-                        <div style="text-align:right"><button type="submit" style="font-family: VT323, monospace; background:#133; color:#7CFF7C; border:1px solid #224; padding:6px">Crea</button>
-                        <button type="button" id="cancelBtn" style="font-family: VT323, monospace; background:#331; color:#ffcccc; border:1px solid #224; padding:6px; margin-left:6px">Annulla</button></div>
-                    </form>
-                </div>
-                `;
-                const dom = this.add.dom(320, 240).createFromHTML(html);
-                const form = dom.node.querySelector('#createRoomForm');
-                const cancel = dom.node.querySelector('#cancelBtn');
-                const cleanup = () => { dom.destroy(); };
-                cancel.addEventListener('click', () => cleanup());
-                form.addEventListener('submit', (e) => {
-                        e.preventDefault();
-                        const roomName = form.elements['roomName'].value.trim();
-                        const mode = form.elements['mode'].value;
-                        const isPrivate = form.elements['isPrivate'].checked;
-                        const maxPlayers = parseInt(form.elements['maxPlayers'].value) || null;
-                        const numTeams = parseInt(form.elements['numTeams'].value) || 2;
-                        if (!roomName) { this.showToast('Inserisci un nome stanza', 2000); return; }
-                        this.socket.emit('createRoom', { roomName, mode, isPrivate, maxPlayers, numTeams });
-                        cleanup();
-                });
-        }
-
-        showNicknameModal() {
-                const html = `
-                <div style="font-family: VT323, monospace; color: #7CFF7C; background:#04110b; padding:12px; border:2px solid #133; width:360px">
-                    <form id="nickForm">
-                        <div style="margin-bottom:8px">Scegli il tuo nickname:<br><input name="nickname" placeholder="Player01" style="width:100%; font-family: VT323, monospace; background:#001; color:#7CFF7C; border:1px solid #224; padding:6px" /></div>
-                        <div style="text-align:right"><button type="submit" style="font-family: VT323, monospace; background:#133; color:#7CFF7C; border:1px solid #224; padding:6px">Entra</button></div>
-                    </form>
-                </div>
-                `;
-                const dom = this.add.dom(320, 220).createFromHTML(html);
-                const form = dom.node.querySelector('#nickForm');
-                form.addEventListener('submit', (e) => {
-                        e.preventDefault();
-                        const nick = form.elements['nickname'].value.trim() || 'Guest';
-                        this.registry.set('nickname', nick);
-                        this.nickname = nick;
-                        localStorage.setItem('nickname', nick);
-                        dom.destroy();
-                    // include selected character
-                    const payload = { nickname: nick, character: this.selectedChar };
-                    this.socket.emit('setNickname', payload);
-                        this.socket.emit('getRooms');
-                        this.showToast('Benvenuto ' + nick, 2000);
-                });
-        }
-
-        showToast(text, ms = 2000) {
-                const x = 520, y = 20;
-                const t = this.add.text(x, y, text, { fontFamily: 'VT323, monospace', fontSize: '14px', color: '#7CFF7C', backgroundColor: '#001', padding: { x:8, y:6 } }).setOrigin(1,0);
-                this.tweens.add({ targets: t, alpha: { from: 0, to: 1 }, duration: 150, yoyo: false });
-                this.time.delayedCall(ms, () => { this.tweens.add({ targets: t, alpha: 0, duration: 300, onComplete: () => t.destroy() }); });
-        }
-
-    preload() {
-        const g = this.make.graphics({ x:0, y:0, add:false });
-        
-        // Texture giocatori (solo per riferimento, ma useremo grafica vettoriale)
-        // Non strettamente necessario perché usiamo cerchi, ma per i muri/erba serve.
-        g.fillStyle(0x44aa44);
-        g.fillRect(0,0,32,32);
-        g.generateTexture('grass', 32,32);
-        g.clear();
-
-        g.fillStyle(0x884422);
-        g.fillRect(0,0,32,32);
-        g.lineStyle(2,0x331100);
-        for (let i=0;i<32;i+=8) { g.moveTo(i,0); g.lineTo(i,32); g.moveTo(0,i); g.lineTo(32,i); }
-        g.strokePath();
-        g.generateTexture('wall', 32,32);
-        g.clear();
-
-        g.fillStyle(0xffaa00);
-        g.fillRect(12,14,8,4);
-        g.generateTexture('laser', 32,32);
-    }
-
-    selectCharacter(id) {
-        this.selectedChar = id;
-        localStorage.setItem('selectedChar', id);
-        this.updateCharSelectionVisual();
-    }
-
-    updateCharSelectionVisual() {
-        for (let ch of this.availableChars) {
-            const icons = this.charIcons && this.charIcons[ch.id];
-            if (!icons) continue;
-            if (this.selectedChar === ch.id) {
-                icons.box.setStrokeStyle(2, 0x7CFF7C);
-            } else {
-                icons.box.setStrokeStyle(0);
+        const tick = this.time.addEvent({
+            delay: 800, repeat: 2, callback: () => {
+                count--;
+                if (count <= 0) {
+                    this.scene.start('GameScene');
+                } else {
+                    countTxt.setText(String(count));
+                    this.tweens.add({ targets: countTxt, scaleX: { from: 1.5, to: 1 }, scaleY: { from: 1.5, to: 1 }, duration: 200 });
+                }
             }
-        }
+        });
+    }
+
+    // ── MODALS ────────────────────────────────────────────────
+    showCreateRoomModal() {
+        const html = `
+<div style="font-family:VT323,monospace;color:#00ddff;background:#020c1a;padding:16px;border:2px solid #224466;width:340px;box-shadow:0 0 20px rgba(0,150,255,0.3)">
+    <div style="font-size:20px;color:#00ddff;margin-bottom:12px;border-bottom:1px solid #224466;padding-bottom:6px">CREATE BATTLE ROOM</div>
+    <form id="createRoomForm">
+        <div style="margin-bottom:10px"><label style="color:#88aacc;font-size:14px">ROOM NAME</label><br>
+            <input name="roomName" style="width:100%;font-family:VT323,monospace;font-size:15px;background:#010a14;color:#00ddff;border:1px solid #224466;padding:6px;margin-top:3px"></div>
+        <div style="margin-bottom:10px"><label style="color:#88aacc;font-size:14px">GAME MODE</label><br>
+            <select name="mode" style="width:100%;font-family:VT323,monospace;font-size:15px;background:#010a14;color:#00ddff;border:1px solid #224466;padding:6px;margin-top:3px">
+                <option value="teamDM">TEAM DEATHMATCH</option>
+                <option value="ffa">FREE FOR ALL</option>
+            </select></div>
+        <div style="display:flex;gap:12px;margin-bottom:10px">
+            <div style="flex:1"><label style="color:#88aacc;font-size:14px">MAX PLAYERS</label><br>
+                <input type="number" name="maxPlayers" min="2" max="12" value="4" style="width:100%;font-family:VT323,monospace;font-size:15px;background:#010a14;color:#00ddff;border:1px solid #224466;padding:6px;margin-top:3px"></div>
+            <div style="flex:1"><label style="color:#88aacc;font-size:14px">TEAMS</label><br>
+                <input type="number" name="numTeams" min="2" max="4" value="2" style="width:100%;font-family:VT323,monospace;font-size:15px;background:#010a14;color:#00ddff;border:1px solid #224466;padding:6px;margin-top:3px"></div>
+        </div>
+        <div style="margin-bottom:14px"><label style="color:#88aacc;font-size:14px"><input type="checkbox" name="isPrivate" style="margin-right:6px"> PRIVATE ROOM</label></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button type="button" id="cancelCreate" style="font-family:VT323,monospace;font-size:15px;background:#160000;color:#ff6644;border:1px solid #442200;padding:8px 16px;cursor:pointer">CANCEL</button>
+            <button type="submit" style="font-family:VT323,monospace;font-size:15px;background:#001a0d;color:#00ff77;border:1px solid #004422;padding:8px 16px;cursor:pointer">CREATE</button>
+        </div>
+    </form>
+</div>`;
+        const dom = this.add.dom(320, 240).createFromHTML(html).setDepth(250);
+        dom.node.querySelector('#cancelCreate').onclick = () => dom.destroy();
+        dom.node.querySelector('#createRoomForm').onsubmit = (e) => {
+            e.preventDefault();
+            const f = e.target;
+            const roomName = f.elements['roomName'].value.trim();
+            if (!roomName) { this.showToast('Enter a room name', 1500); return; }
+            this.socket.emit('createRoom', {
+                roomName, mode: f.elements['mode'].value,
+                isPrivate: f.elements['isPrivate'].checked,
+                maxPlayers: parseInt(f.elements['maxPlayers'].value) || null,
+                numTeams: parseInt(f.elements['numTeams'].value) || 2
+            });
+            dom.destroy();
+        };
+    }
+
+    showNicknameModal() {
+        const html = `
+<div style="font-family:VT323,monospace;color:#00ddff;background:#020c1a;padding:20px;border:2px solid #224466;width:320px;box-shadow:0 0 20px rgba(0,150,255,0.4)">
+    <div style="font-size:24px;color:#00ddff;margin-bottom:6px">⚡ ENTER THE ARENA</div>
+    <div style="font-size:13px;color:#446688;margin-bottom:14px">Choose your pilot designation</div>
+    <form id="nickForm">
+        <input name="nickname" placeholder="PILOT_NAME" maxlength="18" style="width:100%;font-family:VT323,monospace;font-size:20px;background:#010a14;color:#00ddff;border:1px solid #224466;padding:8px;margin-bottom:12px;text-transform:uppercase;letter-spacing:2px">
+        <button type="submit" style="width:100%;font-family:VT323,monospace;font-size:18px;background:#001a0d;color:#00ff77;border:1px solid #004422;padding:10px;cursor:pointer">JACK IN</button>
+    </form>
+</div>`;
+        const dom = this.add.dom(320, 220).createFromHTML(html).setDepth(250);
+        dom.node.querySelector('#nickForm').onsubmit = (e) => {
+            e.preventDefault();
+            const nick = e.target.elements['nickname'].value.trim() || 'GHOST';
+            this.registry.set('nickname', nick);
+            this.nickname = nick;
+            localStorage.setItem('nickname', nick);
+            if (this.nickDisplay) this.nickDisplay.setText('USER: ' + nick);
+            dom.destroy();
+            this.socket.emit('setNickname', { nickname: nick, character: this.selectedChar });
+            this.socket.emit('getRooms');
+            this.showToast('Welcome, ' + nick + '!', 2000);
+        };
+    }
+
+    showToast(text, ms = 2000) {
+        if (this._toast?.active) this._toast.destroy();
+        this._toast = this.add.text(320, 460, text, {
+            fontFamily: 'VT323, monospace', fontSize: '15px', color: '#00ddff',
+            backgroundColor: '#000811', padding: { x: 12, y: 6 },
+            stroke: '#00ddff', strokeThickness: 1
+        }).setOrigin(0.5, 0).setDepth(300).setAlpha(0);
+        this.tweens.add({ targets: this._toast, alpha: 1, duration: 150 });
+        this.time.delayedCall(ms - 250, () => {
+            if (this._toast?.active)
+                this.tweens.add({ targets: this._toast, alpha: 0, duration: 250, onComplete: () => this._toast?.destroy() });
+        });
     }
 
     doLogout() {
-        try { this.socket.emit('logout'); } catch (e) {}
-        try { this.socket.disconnect(); } catch (e) {}
+        try { this.socket.emit('logout'); this.socket.disconnect(); } catch(e) {}
         localStorage.removeItem('nickname');
-        // ricarica la pagina per mostrare il modal nickname
         window.location.reload();
+    }
+
+    update() {
+        if (this.floorBg) { this.floorBg.tilePositionX += 0.06; this.floorBg.tilePositionY += 0.03; }
     }
 }
