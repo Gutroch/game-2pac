@@ -294,10 +294,12 @@ class GameScene extends Phaser.Scene {
                 c.x=Phaser.Math.Linear(c.x,p.x,0.28);
                 c.y=Phaser.Math.Linear(c.y,p.y,0.28);
                 if(c._hpBar) {
-                    const pct=Math.max(0,Math.min(1,p.hp/100));
-                    c._hpBar.width=pct*26;
-                    c._hpBar.x=-13;
-                    c._hpBar.fillColor=pct>0.5?0x00ff77:(pct>0.25?0xffaa00:0xff3300);
+                    const pct = Math.max(0, Math.min(1, me.hp / 5));
+                    if (this.hpBar) {
+                        this.hpBar.width = 120 * pct; 
+                        this.hpBar.x = c.x - 60;
+                        this.hpBar.fillColor = pct > 0.5 ? 0x00ff77 : (pct > 0.25 ? 0xffaa00 : 0xff3300);
+                    }
                     if(c._lastHp!==undefined && p.hp<c._lastHp) {
                         if(c._visor) this.tweens.add({targets:c._visor,alpha:{from:1,to:0.1},duration:70,yoyo:true,repeat:2});
                     }

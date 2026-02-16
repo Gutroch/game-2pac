@@ -28,6 +28,7 @@ class GameEngine {
         this.maxAmmo = 6;
 
         this.roundNumber = 1;
+        this.roundActive = false;
 
         // Genera mappa con muri (bordi e ostacoli casuali)
         this.map = [];
@@ -88,37 +89,60 @@ class GameEngine {
     }
 
     startGame() {
-        // Inizio match: manda breve introduzione/instructions prima del round
-        const instructions = "Obiettivi: elimina i nemici. Usa P per sparare, N per ricaricare. Raccogli power-up.";
-        this.io.to(this.room.id).emit('roundIntro', { instructions, durationMs: 4000 });
+        // 1. Tell clients to load the game scene
+        this.io.to(this.room.id).emit('gameStarting', {
+            map: this.map,
+            tileSize: this.tileSize,
+            mode: this.room.mode,
+            roundNumber: this.roundNumber,
+            scores: this.room.scores,
+            roundsToWin: this.room.roundsToWin,
+            matchDurationMs: this.matchDurationMs
+        });
 
-        // Imposta start match timer
-        this.matchStart = Date.now();
-
-        // Dopo una breve intro, avvia il round
+        // 2. Brief pause to allow scene switch, then send intro
         setTimeout(() => {
-            this.io.to(this.room.id).emit('roundStart', {
-                map: this.map,
-                tileSize: this.tileSize,
-                mode: this.room.mode,
-                roundNumber: this.roundNumber,
-                scores: this.room.scores,
-                roundsToWin: this.room.roundsToWin,
-                matchDurationMs: this.matchDurationMs
-            });
+            const instructions = "Obiettivi: elimina i nemici. Usa P per sparare, N per ricaricare. Raccogli power-up.";
+            this.io.to(this.room.id).emit('roundIntro', { instructions, durationMs: 4000 });
 
-            // Avvia il loop di gioco
-            this.gameInterval = setInterval(() => this.update(), 1000 / 60); // 60 tick/s
-        }, 4000);
+            // 3. After intro, start the round
+            setTimeout(() => {
+                this.io.to(this.room.id).emit('roundStart', {
+                    map: this.map,
+                    tileSize: this.tileSize,
+                    mode: this.room.mode,
+                    roundNumber: this.roundNumber,
+                    scores: this.room.scores,
+                    roundsToWin: this.room.roundsToWin,
+                    matchDurationMs: this.matchDurationMs
+                });
+
+                this.matchStart = Date.now();
+                this.roundActive = true;
+                this.gameInterval = setInterval(() => this.update(), 1000 / 60);
+            }, 4000);
+        }, 1500); // 1.5s for scene switch
     }
 
     handleInput(playerId, input) {
+        if (!this.roundActive) return;
         if (this.players[playerId]) {
             this.players[playerId].input = input;
         }
     }
 
     update() {
+        if (!this.roundActive) {
+            // Still send game state (for countdown view)
+            this.io.to(this.room.id).emit('gameState', {
+                players: this.players,
+                bullets: this.bullets,
+                powerups: this.powerups,
+                obstacles: this.movingObstacles
+            });
+            return;
+        }
+
         // Movimento
         for (let id in this.players) {
             const p = this.players[id];
@@ -130,12 +154,12 @@ class GameEngine {
             if (p.input.down) dy += 1;
             if (dx !== 0 || dy !== 0) {
                 const len = Math.sqrt(dx*dx + dy*dy);
-                dx = (dx/len) * this.playerSpeed;
-                dy = (dy/len) * this.playerSpeed;
+                const speed = this.playerSpeed * (p.speedModifier || 1);
+                dx = (dx/len) * speed;
+                dy = (dy/len) * speed;
 
                 let newX = p.x + dx;
                 if (!this.collidesWithWall(newX, p.y, this.playerRadius)) p.x = newX;
-
                 let newY = p.y + dy;
                 if (!this.collidesWithWall(p.x, newY, this.playerRadius)) p.y = newY;
             }
@@ -356,7 +380,9 @@ class GameEngine {
     }
 
     handleRoundEnd(winner) {
-        // Aggiorna punteggio stanza
+        this.roundActive = false;
+
+        // Update room scores (unchanged)
         if (this.room.mode === 'teamDM') {
             if (winner === 'blue' || winner === 'red') {
                 this.room.scores[winner] = (this.room.scores[winner] || 0) + 1;
@@ -367,49 +393,85 @@ class GameEngine {
             }
         }
 
-        // Notifica round finito
         this.io.to(this.room.id).emit('roundEnded', { winner, scores: this.room.scores });
 
-        // Controlla match end
+        // Check match end (unchanged)
         let matchOver = false;
         if (this.room.mode === 'teamDM') {
             if (this.room.scores.blue >= this.room.roundsToWin) matchOver = true;
             if (this.room.scores.red >= this.room.roundsToWin) matchOver = true;
         } else {
-            // FFA: se qualcuno raggiunge roundsToWin
             for (let pid in this.room.scores) {
                 if (this.room.scores[pid] >= this.room.roundsToWin) matchOver = true;
             }
         }
 
         if (matchOver) {
-            // fine match
             this.endMatch(winner);
             return;
         }
 
-        // Altrimenti prepara round successivo: reset posizioni e stati ma mantieni scores
+        // Prepare next round
         this.roundNumber += 1;
-        // Pulisci proiettili e powerups
         this.bullets = [];
         this.powerups = [];
 
-        // Ripristina giocatori (hp e posizioni)
-        for (let idx = 0; idx < this.room.players.length; idx++) {
-            const p = this.room.players[idx];
+        // Recreate or reset all players based on room.players
+        for (let i = 0; i < this.room.players.length; i++) {
+            const p = this.room.players[i];
+            let team = 'blue';
+            if (this.room.mode === 'teamDM') {
+                team = i % 2 === 0 ? 'blue' : 'red';
+            } else {
+                team = i % 2 === 0 ? 'blue' : 'red'; // FFA: different colors
+            }
+            let x, y;
+            if (team === 'blue') {
+                x = 5 * this.tileSize;
+                y = 7 * this.tileSize;
+            } else {
+                x = 14 * this.tileSize;
+                y = 7 * this.tileSize;
+            }
+
             if (this.players[p.id]) {
+                // Update existing
                 this.players[p.id].hp = 3;
-                // riposiziona come in initializePlayers: semplice logica
-                const team = this.players[p.id].team;
-                if (team === 'blue') { this.players[p.id].x = 5 * this.tileSize; this.players[p.id].y = 7 * this.tileSize; }
-                else { this.players[p.id].x = 14 * this.tileSize; this.players[p.id].y = 7 * this.tileSize; }
+                this.players[p.id].x = x;
+                this.players[p.id].y = y;
+                this.players[p.id].team = team;
+                this.players[p.id].speedModifier = 1;
+                this.players[p.id].doubleDamage = false;
+                this.players[p.id].ammo = this.maxAmmo;
+                this.players[p.id].reloadTimer = 0;
+            } else {
+                // Create new (player had died)
+                this.players[p.id] = {
+                    id: p.id,
+                    nickname: p.nickname,
+                    team,
+                    x,
+                    y,
+                    hp: 3,
+                    input: { left: false, right: false, up: false, down: false },
+                    ammo: this.maxAmmo,
+                    reloadTimer: 0,
+                    speedModifier: 1,
+                    doubleDamage: false,
+                    character: p.character || null
+                };
             }
         }
 
-        // Invia evento di countdown e poi roundStart
+        // Countdown and next round start
         this.io.to(this.room.id).emit('roundCountdown', { seconds: 3, nextRound: this.roundNumber });
         setTimeout(() => {
-            this.io.to(this.room.id).emit('roundStart', { roundNumber: this.roundNumber, scores: this.room.scores, roundsToWin: this.room.roundsToWin });
+            this.io.to(this.room.id).emit('roundStart', {
+                roundNumber: this.roundNumber,
+                scores: this.room.scores,
+                roundsToWin: this.room.roundsToWin
+            });
+            this.roundActive = true; // <-- reactivate
         }, 3000);
     }
 
@@ -432,6 +494,7 @@ class GameEngine {
 
     // Chiamato dal client quando spara
     handleShoot(playerId, dir) {
+        if (!this.roundActive) return;
         const player = this.players[playerId];
         if (!player) return;
         // check ammo and reload
@@ -455,6 +518,7 @@ class GameEngine {
     }
 
     handleReload(playerId) {
+        if (!this.roundActive) return;
         const player = this.players[playerId];
         if (!player) return;
         if (player.reloadTimer && player.reloadTimer > 0) return; // already reloading
